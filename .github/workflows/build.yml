@@ -1,0 +1,86 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify formatting
+        shell: pwsh
+        run: |
+          $unformatted = gofmt -l .
+          if ($unformatted) {
+            Write-Error "Files need gofmt:`n$($unformatted -join "`n")"
+          }
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+  release:
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Windows AMD64 package
+        id: package
+        shell: pwsh
+        run: |
+          $chinaTime = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId(
+            [DateTimeOffset]::UtcNow,
+            'China Standard Time'
+          )
+          $stamp = $chinaTime.ToString('yyyyMMdd-HHmmss')
+          $tag = "build-$stamp"
+          $archive = "SetFTA-windows-amd64-$stamp.zip"
+
+          New-Item -ItemType Directory -Path package/examples -Force | Out-Null
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          go build -trimpath -ldflags='-s -w' -o package/SetFTA.exe ./cmd/setfta
+          Copy-Item examples/Set-My-Associations.bat -Destination package/examples
+          Copy-Item README.md -Destination package
+          Compress-Archive -Path package/* -DestinationPath $archive
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+          "stamp=$stamp" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create '${{ steps.package.outputs.tag }}' `
+            '${{ steps.package.outputs.archive }}' `
+            --target '${{ github.sha }}' `
+            --title 'SetFTA ${{ steps.package.outputs.stamp }} (UTC+8)' `
+            --notes 'Automated Windows AMD64 build from commit ${{ github.sha }}.'
